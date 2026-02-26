@@ -10,6 +10,8 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-syne);
+  --font-body: var(--font-dm-sans);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,4 +25,214 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ─── Marketing design tokens ──────────────────────────────────────────────── */
+
+:root {
+  --m-bg: #050508;
+  --m-surface: #0b0b14;
+  --m-surface-2: #111122;
+  --m-border: rgba(255, 255, 255, 0.07);
+  --m-border-accent: rgba(0, 255, 148, 0.2);
+  --m-accent: #00ff94;
+  --m-accent-dim: rgba(0, 255, 148, 0.12);
+  --m-text: #ebebf5;
+  --m-muted: #8080a0;
+  --m-subtle: #464666;
+}
+
+/* ─── Marketing base ────────────────────────────────────────────────────────── */
+
+.m-page {
+  background-color: var(--m-bg);
+  color: var(--m-text);
+  font-family: var(--font-dm-sans), system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+.m-display {
+  font-family: var(--font-syne), system-ui, sans-serif;
+}
+
+/* ─── Noise grain overlay ───────────────────────────────────────────────────── */
+
+.noise-overlay {
+  position: relative;
+}
+
+.noise-overlay::before {
+  content: '';
+  position: fixed;
+  inset: -50%;
+  width: 200%;
+  height: 200%;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  opacity: 0.028;
+  pointer-events: none;
+  z-index: 9998;
+  will-change: transform;
+}
+
+/* ─── Grid background ───────────────────────────────────────────────────────── */
+
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* ─── Accent glow ───────────────────────────────────────────────────────────── */
+
+.accent-glow {
+  box-shadow: 0 0 24px rgba(0, 255, 148, 0.25), 0 0 80px rgba(0, 255, 148, 0.08);
+}
+
+.accent-glow-sm {
+  box-shadow: 0 0 12px rgba(0, 255, 148, 0.2);
+}
+
+.accent-text-glow {
+  text-shadow: 0 0 24px rgba(0, 255, 148, 0.5);
+}
+
+/* ─── Scan line animations ──────────────────────────────────────────────────── */
+
+@keyframes scan-sweep {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  5% {
+    opacity: 1;
+  }
+  95% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(600px);
+    opacity: 0;
+  }
+}
+
+.scan-sweep {
+  animation: scan-sweep 6s linear infinite;
+}
+
+/* ─── Terminal typing animations ────────────────────────────────────────────── */
+
+@keyframes line-appear {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.term-line {
+  animation: line-appear 0.3s ease both;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor-blink {
+  animation: cursor-blink 1.1s step-end infinite;
+}
+
+/* ─── Nav scroll transition ─────────────────────────────────────────────────── */
+
+.m-nav {
+  transition: background-color 0.3s ease, border-color 0.3s ease, backdrop-filter 0.3s ease;
+}
+
+/* ─── Card hover lift ───────────────────────────────────────────────────────── */
+
+.m-card {
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.m-card:hover {
+  border-color: rgba(0, 255, 148, 0.25);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* ─── Button styles ─────────────────────────────────────────────────────────── */
+
+.btn-primary {
+  background-color: var(--m-accent);
+  color: #050508;
+  font-family: var(--font-syne), sans-serif;
+  font-weight: 700;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+
+.btn-primary:hover {
+  background-color: #1affa0;
+  box-shadow: 0 0 20px rgba(0, 255, 148, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-ghost {
+  color: var(--m-muted);
+  border: 1px solid var(--m-border);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-ghost:hover {
+  color: var(--m-text);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* ─── Section dividers ──────────────────────────────────────────────────────── */
+
+.m-divider {
+  border-top: 1px solid var(--m-border);
+}
+
+/* ─── Radial hero glow ──────────────────────────────────────────────────────── */
+
+.hero-glow {
+  background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(0, 255, 148, 0.06) 0%, transparent 70%);
+}
+
+/* ─── Pure-CSS hover link helpers ──────────────────────────────────────────── */
+
+.m-link-hover {
+  transition: color 0.15s ease;
+}
+
+.m-link-hover:hover {
+  color: #00ff94;
+}
+
+.m-link-underline-hover {
+  transition: text-decoration-color 0.15s ease;
+}
+
+.m-link-underline-hover:hover {
+  text-decoration: underline;
+}
+
+/* ─── Step connector line ───────────────────────────────────────────────────── */
+
+.step-line {
+  background: linear-gradient(90deg, var(--m-accent) 0%, rgba(0, 255, 148, 0.2) 100%);
+}
+
+/* ─── Truth bomb quote ──────────────────────────────────────────────────────── */
+
+.quote-bar {
+  background: linear-gradient(180deg, var(--m-accent) 0%, rgba(0, 255, 148, 0.4) 100%);
 }
