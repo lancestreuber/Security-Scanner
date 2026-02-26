@@ -1,0 +1,13 @@
+# Supabase CLI configuration
+# This file is required by the CLI to locate the project root and functions directory.
+# The project_id is used only for local development naming — the --project-ref flag
+# controls which remote project is targeted for deploy/db commands.
+project_id = "security-scanner"
+
+[functions.run-scan]
+enabled = true
+verify_jwt = false
+
+[functions.run-scan-scheduler]
+enabled = true
+verify_jwt = false
