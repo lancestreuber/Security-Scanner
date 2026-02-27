@@ -42,7 +42,7 @@ export default async function ScanPage({
     .from('scans')
     .select(
       'id, status, created_at, user_id, error_message, overall_score, report_summary, ' +
-        'agent_plan, remediation, check_ssl, check_headers, check_redirects, check_credentials, check_api_probe, ' +
+        'agent_plan, remediation, check_ssl, check_headers, check_redirects, check_credentials, check_api_probe, check_source_scan, ' +
         'sites!site_id(url, display_name)'
     )
     .eq('id', id)
@@ -77,6 +77,7 @@ export default async function ScanPage({
     check_redirects: scan.check_redirects,
     check_credentials: scan.check_credentials,
     check_api_probe: scan.check_api_probe,
+    check_source_scan: scan.check_source_scan,
   }
 
   return (

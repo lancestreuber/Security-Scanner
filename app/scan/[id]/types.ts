@@ -28,6 +28,33 @@ export type Remediation = {
   low?: RemediationItem[]
 }
 
+export type SourceFinding = {
+  source: string        // JS file URL, 'html', or 'inline[N]'
+  source_type: 'html' | 'inline_script' | 'js_bundle'
+  pattern: string       // e.g. "OpenAI API Key"
+  severity: 'high' | 'medium' | 'low'
+  preview: string       // 80-char line excerpt, secret redacted after 6 chars
+}
+
+export type LoginFinding = {
+  issue: string
+  severity: 'high' | 'medium' | 'low'
+  detail: string
+}
+
+export type LoginCheckResult = {
+  login_url: string
+  findings: LoginFinding[]
+}
+
+export type SourceScanResult = CheckResult & {
+  pages_scanned: number
+  js_files_scanned: number
+  inline_scripts_count: number
+  findings: SourceFinding[]
+  login_check: LoginCheckResult | null
+}
+
 export type ScanData = {
   id: string
   status: string
@@ -42,6 +69,7 @@ export type ScanData = {
   check_redirects: CheckResult | null
   check_credentials: CheckResult | null
   check_api_probe: CheckResult | null
+  check_source_scan: SourceScanResult | null
 }
 
 export type SiteData = {

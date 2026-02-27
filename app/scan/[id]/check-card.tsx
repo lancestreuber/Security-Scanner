@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import type { CheckResult } from './types'
+import type { CheckResult, SourceFinding, LoginFinding } from './types'
 
 type Props = {
   label: string
@@ -347,6 +347,108 @@ function DetailContent({ result }: { result: CheckResult }) {
               })}
             </div>
           </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Source code secrets ──────────────────────────────────
+  if (typeof result.js_files_scanned === 'number') {
+    const sourceFindings = Array.isArray(result.findings)
+      ? (result.findings as SourceFinding[])
+      : []
+    const loginCheck = result.login_check as { login_url: string; findings: LoginFinding[] } | null
+    const hasFindings = sourceFindings.length > 0
+    const hasLoginIssues = loginCheck && loginCheck.findings.length > 0
+
+    const sourceTypeBadge = (st: string) => {
+      if (st === 'html')          return 'bg-purple-950/60 border-purple-800/60 text-purple-400'
+      if (st === 'inline_script') return 'bg-orange-950/60 border-orange-800/60 text-orange-400'
+      return 'bg-blue-950/60 border-blue-800/60 text-blue-400'
+    }
+    const sourceTypeLabel = (st: string) => {
+      if (st === 'html')          return 'html'
+      if (st === 'inline_script') return 'inline'
+      return 'js bundle'
+    }
+
+    return (
+      <div className="space-y-5">
+        {/* Coverage stats */}
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
+            Coverage
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: 'Pages', value: result.pages_scanned as number },
+              { label: 'JS Files', value: result.js_files_scanned as number },
+              { label: 'Inline Scripts', value: result.inline_scripts_count as number },
+            ].map(({ label, value }) => (
+              <div key={label} className="rounded-lg border border-gray-800 bg-gray-900/60 p-2.5 text-center">
+                <p className="text-base font-bold text-white">{value}</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Source findings */}
+        {hasFindings && (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
+              Secrets found
+            </p>
+            <div className="space-y-2">
+              {sourceFindings.map((f, i) => (
+                <div key={i} className="rounded-lg border border-red-900/40 bg-red-950/20 p-3 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <SeverityPill severity={f.severity} />
+                    <span className={`inline-block rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${sourceTypeBadge(f.source_type)}`}>
+                      {sourceTypeLabel(f.source_type)}
+                    </span>
+                  </div>
+                  <p className="text-xs font-medium text-gray-200">{f.pattern}</p>
+                  <p className="text-[11px] font-mono text-gray-500 truncate" title={f.source}>{f.source}</p>
+                  <p className="text-[11px] font-mono text-gray-400 break-all leading-snug">{f.preview}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Login page analysis */}
+        {loginCheck && (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
+              Login page analysis
+            </p>
+            <p className="text-[11px] font-mono text-gray-500 mb-2 truncate" title={loginCheck.login_url}>
+              {loginCheck.login_url}
+            </p>
+            {hasLoginIssues ? (
+              <div className="space-y-2">
+                {loginCheck.findings.map((f, i) => (
+                  <div key={i} className="rounded-lg border border-gray-800 bg-gray-900 p-3 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <SeverityPill severity={f.severity} />
+                      <span className="text-xs font-medium text-gray-200">{f.issue}</span>
+                    </div>
+                    <p className="text-[11px] text-gray-400 leading-snug">{f.detail}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-green-400">✓ No login security issues detected</p>
+            )}
+          </div>
+        )}
+
+        {/* Clean state */}
+        {!hasFindings && !hasLoginIssues && (
+          <p className="text-xs text-green-400">
+            ✓ No secrets or credentials found in source code
+          </p>
         )}
       </div>
     )

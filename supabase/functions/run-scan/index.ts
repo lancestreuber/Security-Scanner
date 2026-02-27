@@ -2,10 +2,10 @@
 // run-scan — Supabase Edge Function (Deno)
 //
 // Invoked by /api/scans after a scan row is created.
-// Phase 6 (enhanced): Claude recon plan with targeted attack surface
-//   mapping, active multi-vector attack probing (SQLi, path traversal,
-//   SSRF, GraphQL introspection, JWT none-alg, debug injection),
-//   Claude-generated interpretation + remediation report.
+// Phase 7: HTML/JS source code scanner.
+//   Fetches main page HTML + up to 10 same-origin JS bundles.
+//   Scans all content with 18 regex patterns for leaked secrets.
+//   If a login page is detected, Claude analyzes it for auth weaknesses.
 // ============================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -25,6 +25,33 @@ interface AgentPlan {
   observations:           string[]
   probe_targets:          ProbeTarget[]
   extra_credential_paths: string[]
+}
+
+interface SourceFinding {
+  source:      string
+  source_type: 'html' | 'inline_script' | 'js_bundle'
+  pattern:     string
+  severity:    'high' | 'medium' | 'low'
+  preview:     string
+}
+
+interface LoginFinding {
+  issue:    string
+  severity: 'high' | 'medium' | 'low'
+  detail:   string
+}
+
+interface LoginCheckResult {
+  login_url: string
+  findings:  LoginFinding[]
+}
+
+interface SourceScanResult extends CheckResult {
+  pages_scanned:        number
+  js_files_scanned:     number
+  inline_scripts_count: number
+  findings:             SourceFinding[]
+  login_check:          LoginCheckResult | null
 }
 
 // ── Utility ──────────────────────────────────────────────────
@@ -641,6 +668,285 @@ function attacks_count(): string {
   return '7' // Baseline + 6 active attacks (SQLi, path traversal, debug injection, SSRF, JWT none, open redirect)
 }
 
+// ── Source Code Secret Scanner ────────────────────────────────
+// Fetches main page HTML, extracts + fetches same-origin JS bundles,
+// and scans all content for 18 known secret patterns using regex.
+// No AI involved — fully deterministic. Secret values are redacted
+// to the first 6 chars before storage.
+
+const SOURCE_SCAN_PATTERNS: Array<{
+  name: string
+  pattern: RegExp
+  severity: 'high' | 'medium' | 'low'
+}> = [
+  { name: 'AWS Access Key',               severity: 'high',   pattern: /AKIA[0-9A-Z]{16}/ },
+  { name: 'GitHub Token',                 severity: 'high',   pattern: /gh[pousr]_[A-Za-z0-9_]{36}/ },
+  { name: 'Stripe Secret Key',            severity: 'high',   pattern: /sk_(test|live)_[a-zA-Z0-9]{24,}/ },
+  { name: 'Private Key Header',           severity: 'high',   pattern: /-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY/ },
+  { name: 'Database URL',                 severity: 'high',   pattern: /(?:postgres|mysql|mongodb|redis):\/\/[^:]+:[^@\s"']{3,}@/ },
+  { name: 'API Key Assignment',           severity: 'medium', pattern: /api[_-]?key\s*[:=>"'`]+\s*[a-zA-Z0-9_\-]{16,}/i },
+  { name: 'Secret Token Assignment',      severity: 'high',   pattern: /secret[_-]?(?:key|token)\s*[:=>"'`]+\s*[a-zA-Z0-9_\-]{16,}/i },
+  { name: 'Password Assignment',          severity: 'high',   pattern: /(?:^|\s|[,{(])(?:db_)?password\s*[:=>"'`]+\s*[^\s"'`]{8,}/im },
+  { name: 'Bearer Token',                 severity: 'medium', pattern: /Authorization:\s*Bearer\s+[a-zA-Z0-9_\-\.]{20,}/i },
+  { name: 'JWT Secret',                   severity: 'high',   pattern: /jwt[_-]?secret\s*[:=>"'`]+\s*\S{8,}/i },
+  { name: 'OpenAI API Key',               severity: 'high',   pattern: /sk-[a-zA-Z0-9]{48}/ },
+  { name: 'Anthropic API Key',            severity: 'high',   pattern: /sk-ant-[a-zA-Z0-9_\-]{90,}/ },
+  { name: 'Supabase JWT',                 severity: 'high',   pattern: /eyJ[a-zA-Z0-9_\-]{60,}\.[a-zA-Z0-9_\-]{60,}\.[a-zA-Z0-9_\-]{10,}/ },
+  { name: 'Firebase API Key',             severity: 'high',   pattern: /AIza[0-9A-Za-z_\-]{35}/ },
+  { name: 'Bundled Env Var with Secret',  severity: 'high',   pattern: /(?:NEXT_PUBLIC_|VITE_|REACT_APP_)\w+\s*[:=]+\s*["'`]?[a-zA-Z0-9_\-\.\/+]{16,}["'`]?/ },
+  { name: 'Hardcoded Password in JS',     severity: 'high',   pattern: /\bpassword\s*[:=]+\s*["'`][^"'`\s]{8,}["'`]/i },
+  { name: 'Slack Webhook URL',            severity: 'medium', pattern: /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[a-zA-Z0-9]+/ },
+]
+
+// Scans content line-by-line against SOURCE_SCAN_PATTERNS.
+// Redacts secret values (keeps first 6 chars). One finding per line.
+function scanContentForSecrets(
+  content: string,
+  sourceType: 'html' | 'inline_script' | 'js_bundle',
+  source: string,
+): SourceFinding[] {
+  const findings: SourceFinding[] = []
+  const lines = content.split('\n')
+
+  for (const line of lines) {
+    for (const { name, pattern, severity } of SOURCE_SCAN_PATTERNS) {
+      const m = pattern.exec(line)
+      if (m) {
+        const matched  = m[0]
+        const redacted = matched.length > 6 ? matched.slice(0, 6) + '[REDACTED]' : matched
+        const preview  = line.replace(matched, redacted).trim().slice(0, 80)
+        findings.push({ source, source_type: sourceType, pattern: name, severity, preview })
+        break // one finding per line
+      }
+    }
+  }
+
+  return findings
+}
+
+// Checks for email+password proximity: an email address within 200 chars
+// of a password assignment is a hardcoded credential pair.
+function checkEmailPasswordProximity(
+  content: string,
+  sourceType: 'html' | 'inline_script' | 'js_bundle',
+  source: string,
+): SourceFinding[] {
+  const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g
+  const passRe  = /\bpassword\s*[:=>"'`]+\s*["'`][^"'`\s]{8,}["'`]/i
+  const findings: SourceFinding[] = []
+
+  let m: RegExpExecArray | null
+  while ((m = emailRe.exec(content)) !== null) {
+    const start  = Math.max(0, m.index - 100)
+    const end    = Math.min(content.length, m.index + m[0].length + 100)
+    const window = content.slice(start, end)
+    if (passRe.test(window)) {
+      findings.push({
+        source,
+        source_type: sourceType,
+        pattern:     'Hardcoded Email + Password Combo',
+        severity:    'high',
+        preview:     `${m[0].slice(0, 6)}[REDACTED] (email+password pair detected)`,
+      })
+      break // one finding per content block
+    }
+  }
+
+  return findings
+}
+
+// Uses Claude to analyze a login page's HTML for authentication weaknesses.
+// Returns null on any error — the scan continues without login analysis.
+async function loginClaudeCheck(loginUrl: string): Promise<LoginCheckResult | null> {
+  try {
+    const resp = await withTimeout(
+      fetch(loginUrl, { redirect: 'follow', headers: { 'User-Agent': UA } }),
+      5_000, 'login page fetch'
+    )
+    if (!resp.ok) return null
+    const html = (await resp.text()).slice(0, 8_000)
+
+    const prompt =
+      `You are a security analyst reviewing a login page for authentication weaknesses.\n` +
+      `Login page URL: ${loginUrl}\n\n` +
+      `HTML (truncated to 8000 chars):\n${html}\n\n` +
+      `Analyze for these specific issues:\n` +
+      `1. Hardcoded credentials (username/password in HTML or JavaScript)\n` +
+      `2. HTTP form actions (form submitting over HTTP instead of HTTPS)\n` +
+      `3. Missing CSRF tokens (no hidden input with csrf/token/nonce in forms)\n` +
+      `4. Exposed OAuth secrets (client_secret, app_secret in source)\n` +
+      `5. Hardcoded test/demo accounts (test@example.com, admin/admin, etc.)\n` +
+      `6. Client-side-only auth (auth logic that can be bypassed in browser)\n\n` +
+      `Return ONLY valid JSON — no markdown:\n` +
+      `{"findings":[{"issue":"<title>","severity":"high|medium|low","detail":"<specific finding>"}]}\n` +
+      `If no issues found, return: {"findings":[]}`
+
+    const content = await callClaude([{ role: 'user', content: prompt }], 600)
+
+    try {
+      const parsed = JSON.parse(content) as { findings?: Array<{ issue: string; severity: string; detail: string }> }
+      if (!Array.isArray(parsed.findings)) return null
+      return {
+        login_url: loginUrl,
+        findings: parsed.findings.slice(0, 10).map(f => ({
+          issue:    String(f.issue),
+          severity: (['high', 'medium', 'low'] as const).includes(f.severity as 'high' | 'medium' | 'low')
+            ? f.severity as 'high' | 'medium' | 'low'
+            : 'medium',
+          detail: String(f.detail),
+        })),
+      }
+    } catch { return null }
+  } catch { return null }
+}
+
+// Main source scan function. Returns { result, loginPromise }.
+// The loginPromise starts immediately when a login page is detected and runs
+// in parallel with the rest of the scan pipeline — zero added latency.
+async function checkSourceScan(baseUrl: string): Promise<{
+  result: SourceScanResult
+  loginPromise: Promise<LoginCheckResult | null>
+}> {
+  const ERROR_RESULT = (msg: string): { result: SourceScanResult; loginPromise: Promise<null> } => ({
+    result: {
+      status: 'error',
+      summary: msg,
+      pages_scanned: 0,
+      js_files_scanned: 0,
+      inline_scripts_count: 0,
+      findings: [],
+      login_check: null,
+    },
+    loginPromise: Promise.resolve(null),
+  })
+
+  const origin = new URL(baseUrl).origin
+
+  // ── Fetch main page HTML ─────────────────────────────────
+  let html = ''
+  try {
+    const resp = await withTimeout(
+      fetch(baseUrl, { redirect: 'follow', headers: { 'User-Agent': UA } }),
+      8_000, 'source scan HTML fetch'
+    )
+    const ct = resp.headers.get('content-type') ?? ''
+    if (!resp.ok || (!ct.includes('text/html') && !ct.includes('application/xhtml'))) {
+      return ERROR_RESULT('Failed to fetch main page HTML')
+    }
+    html = (await resp.text()).slice(0, 500_000)
+  } catch (err) {
+    return ERROR_RESULT(`HTML fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // ── Extract <script src="..."> URLs (same-origin only, cap 10) ───
+  const scriptSrcRe = /<script[^>]+src=["']([^"']+)["'][^>]*>/gi
+  const scriptUrls: string[] = []
+  const seenUrls   = new Set<string>()
+  let srMatch: RegExpExecArray | null
+  while ((srMatch = scriptSrcRe.exec(html)) !== null && scriptUrls.length < 10) {
+    try {
+      const abs = new URL(srMatch[1], baseUrl).toString()
+      if (new URL(abs).origin === origin && !seenUrls.has(abs)) {
+        seenUrls.add(abs)
+        scriptUrls.push(abs)
+      }
+    } catch { /* skip invalid URLs */ }
+  }
+
+  // ── Extract inline scripts (no src attr) ─────────────────
+  const inlineRe = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi
+  const inlineScripts: string[] = []
+  let inMatch: RegExpExecArray | null
+  while ((inMatch = inlineRe.exec(html)) !== null) {
+    const text = inMatch[1].trim()
+    if (text.length > 0) inlineScripts.push(text)
+  }
+
+  // ── Fetch JS bundles in parallel ─────────────────────────
+  const jsResults = await Promise.allSettled(
+    scriptUrls.map(url =>
+      withTimeout(
+        fetch(url, { headers: { 'User-Agent': UA } }),
+        5_000, `JS fetch ${url}`
+      ).then(async resp => {
+        if (!resp.ok) return null
+        const text = (await resp.text()).slice(0, 200_000)
+        return { url, text }
+      }).catch(() => null)
+    )
+  )
+
+  // ── Scan all content ──────────────────────────────────────
+  const allFindings: SourceFinding[] = []
+
+  // HTML content
+  allFindings.push(...scanContentForSecrets(html, 'html', 'html'))
+  allFindings.push(...checkEmailPasswordProximity(html, 'html', 'html'))
+
+  // Inline scripts
+  inlineScripts.forEach((content, i) => {
+    allFindings.push(...scanContentForSecrets(content, 'inline_script', `inline[${i}]`))
+    allFindings.push(...checkEmailPasswordProximity(content, 'inline_script', `inline[${i}]`))
+  })
+
+  // JS bundles
+  let jsFilesScanned = 0
+  for (const r of jsResults) {
+    if (r.status !== 'fulfilled' || !r.value) continue
+    jsFilesScanned++
+    const { url, text } = r.value
+    allFindings.push(...scanContentForSecrets(text, 'js_bundle', url))
+    allFindings.push(...checkEmailPasswordProximity(text, 'js_bundle', url))
+  }
+
+  // ── Detect login page ─────────────────────────────────────
+  let loginUrl: string | null = null
+  const loginHrefRe = /href=["']([^"']*(?:\/login|\/signin|\/sign-in|\/auth(?:\/login)?|\/account\/login)[^"']*)["']/gi
+  let hrefMatch: RegExpExecArray | null
+  if ((hrefMatch = loginHrefRe.exec(html)) !== null) {
+    try { loginUrl = new URL(hrefMatch[1], baseUrl).toString() } catch { /* skip */ }
+  }
+  // Also treat the page itself as a login page if it has a password input
+  if (!loginUrl && /<input[^>]+type=["']?password/i.test(html)) {
+    loginUrl = baseUrl
+  }
+
+  // Fire login check as a floating Promise (no await — runs in parallel)
+  const loginPromise: Promise<LoginCheckResult | null> = loginUrl
+    ? loginClaudeCheck(loginUrl).catch(() => null)
+    : Promise.resolve(null)
+
+  // ── Deduplicate findings ──────────────────────────────────
+  const unique = new Map<string, SourceFinding>()
+  for (const f of allFindings) {
+    const key = `${f.source}::${f.pattern}::${f.preview.slice(0, 20)}`
+    if (!unique.has(key)) unique.set(key, f)
+  }
+  const findings = Array.from(unique.values())
+
+  // ── Build result ──────────────────────────────────────────
+  const status: CheckStatus =
+    findings.some(f => f.severity === 'high')   ? 'failed'  :
+    findings.some(f => f.severity === 'medium') ? 'warning' : 'passed'
+
+  const summary = findings.length === 0
+    ? `Scanned ${inlineScripts.length} inline script${inlineScripts.length !== 1 ? 's' : ''} and ${jsFilesScanned} JS file${jsFilesScanned !== 1 ? 's' : ''} — no secrets found`
+    : `${findings.length} potential secret${findings.length !== 1 ? 's' : ''} found in source code`
+
+  return {
+    result: {
+      status,
+      summary,
+      pages_scanned:        1,
+      js_files_scanned:     jsFilesScanned,
+      inline_scripts_count: inlineScripts.length,
+      findings,
+      login_check: null, // filled in after loginPromise settles
+    },
+    loginPromise,
+  }
+}
+
 // ── Claude Call 2: Remediation report ─────────────────────────
 async function claudeRemediation(
   siteUrl: string,
@@ -649,7 +955,11 @@ async function claudeRemediation(
   redirects: CheckResult,
   credentials: CheckResult,
   apiProbe: CheckResult,
+  sourceScan: SourceScanResult,
 ): Promise<{ score: number; summary: string; remediation: unknown }> {
+  const sourceFindings = sourceScan.findings ?? []
+  const loginCheck = sourceScan.login_check
+
   const checksPayload = JSON.stringify({
     ssl: { status: ssl.status, summary: ssl.summary, issuer: ssl.issuer, days_remaining: ssl.days_remaining },
     headers: {
@@ -666,6 +976,15 @@ async function claudeRemediation(
       findings: (apiProbe.findings as Array<{ endpoint: string; attack: string; severity: string; issue: string }> | undefined)
         ?.map(f => ({ endpoint: f.endpoint, attack: f.attack, severity: f.severity, issue: f.issue })) ?? [],
     },
+    source_scan: {
+      status:   sourceScan.status,
+      summary:  sourceScan.summary,
+      findings: sourceFindings.map(f => ({ pattern: f.pattern, severity: f.severity, source: f.source })),
+      login_check: loginCheck ? {
+        login_url: loginCheck.login_url,
+        findings:  loginCheck.findings.map(f => ({ issue: f.issue, severity: f.severity })),
+      } : null,
+    },
   })
 
   const prompt =
@@ -679,6 +998,8 @@ async function claudeRemediation(
     `No HTTPS redirect -20 | Redirect chain >4 hops -5\n` +
     `Credential exposure high -25/file | medium -10/file\n` +
     `API: SQL injection or path traversal -30 | SSRF or JWT none-alg -25 | unauthenticated JSON -15 | open redirect or debug leak -10 | server error -5\n` +
+    `Source code secrets: high severity finding -20 (max -40) | medium severity finding -10 (max -20)\n` +
+    `Login page: hardcoded cred -25 | HTTP form action -15 | missing CSRF token -10\n` +
     `Minimum score 0. Only include non-empty severity buckets. Keep fixes technical and concise.`
 
   const parseReport = (raw: string) => {
@@ -694,8 +1015,20 @@ async function claudeRemediation(
 
   const fallbackScore = (): { score: number; summary: string; remediation: unknown } => {
     const pts = (r: CheckResult) => ({ passed: 20, warning: 12, failed: 0, error: 5 }[r.status] ?? 5)
-    const score    = pts(ssl) + pts(headers) + pts(redirects) + pts(credentials) + pts(apiProbe)
-    const problems = [ssl, headers, redirects, credentials, apiProbe].filter(r => r.status !== 'passed').map(r => r.summary)
+    const basePts = pts(ssl) + pts(headers) + pts(redirects) + pts(credentials) + pts(apiProbe)
+
+    // Deduct for source scan findings
+    const sourcePenalty = Math.min(40,
+      sourceFindings.filter(f => f.severity === 'high').length   * 8 +
+      sourceFindings.filter(f => f.severity === 'medium').length * 4
+    )
+
+    const score = Math.max(0, basePts - sourcePenalty)
+    const problems = [ssl, headers, redirects, credentials, apiProbe]
+      .filter(r => r.status !== 'passed')
+      .map(r => r.summary)
+    if (sourceFindings.length > 0) problems.push(sourceScan.summary)
+
     return {
       score,
       summary: problems.length === 0
@@ -759,11 +1092,13 @@ Deno.serve(async (req: Request) => {
     const plan = await claudeRecon(siteUrl, hostname)
     await supabase.from('scans').update({ agent_plan: plan }).eq('id', scanId)
 
-    // ── Step 3: All 5 checks in parallel ─────────────────────
+    // ── Step 3: All 6 checks in parallel ─────────────────────
     // Each check writes to DB immediately on completion (incremental UI).
     // Credential scan uses both standard + Claude-suggested paths.
     // API probe runs full attack battery (7 vectors) per endpoint.
-    const [sslResult, headersResult, redirectsResult, credentialsResult, apiProbeResult] =
+    // Source scan fetches HTML + JS bundles + runs pattern matching;
+    //   login Claude call fires as a floating Promise inside checkSourceScan.
+    const [sslResult, headersResult, redirectsResult, credentialsResult, apiProbeResult, sourceScanReturn] =
       await Promise.all([
         checkSSL(hostname).then(async r => {
           await supabase.from('scans').update({ check_ssl: r }).eq('id', scanId)
@@ -785,12 +1120,39 @@ Deno.serve(async (req: Request) => {
           await supabase.from('scans').update({ check_api_probe: r }).eq('id', scanId)
           return r
         }),
+        // checkSourceScan returns { result, loginPromise }.
+        // We write the initial result (no login_check) to DB immediately.
+        checkSourceScan(siteUrl).then(async ({ result, loginPromise }) => {
+          await supabase.from('scans').update({ check_source_scan: result }).eq('id', scanId)
+          return { result, loginPromise }
+        }),
       ])
+
+    // ── Step 3.5: Collect login analysis result ───────────────
+    // The login Claude call has been running since inside checkSourceScan.
+    // Race it against a 4s safety timeout — in practice it's already done.
+    const loginCheck = await Promise.race([
+      sourceScanReturn.loginPromise,
+      new Promise<null>(resolve => setTimeout(() => resolve(null), 4_000)),
+    ])
+
+    // Merge login result into source scan and re-write to DB
+    const sourceScanFinal: SourceScanResult = {
+      ...sourceScanReturn.result,
+      login_check: loginCheck,
+      // Escalate status if login analysis found high-severity issues
+      status: (loginCheck?.findings.some(f => f.severity === 'high') &&
+               sourceScanReturn.result.status !== 'failed')
+        ? 'warning'
+        : sourceScanReturn.result.status,
+    }
+    await supabase.from('scans').update({ check_source_scan: sourceScanFinal }).eq('id', scanId)
 
     // ── Step 4: Claude Call 2 — Interpret + remediate ─────────
     const report = await claudeRemediation(
       siteUrl,
-      sslResult, headersResult, redirectsResult, credentialsResult, apiProbeResult
+      sslResult, headersResult, redirectsResult, credentialsResult, apiProbeResult,
+      sourceScanFinal,
     )
 
     // ── Step 5: Mark complete ─────────────────────────────────

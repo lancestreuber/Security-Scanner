@@ -4,14 +4,14 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import CheckCard from './check-card'
-import type { ScanData, SiteData, Remediation, RemediationItem } from './types'
+import type { ScanData, SiteData, Remediation, RemediationItem, SourceFinding, LoginFinding } from './types'
 
 // ─── Check definitions ────────────────────────────────────────────────────────
 
 const CHECKS: Array<{
   key: keyof Pick<
     ScanData,
-    'check_ssl' | 'check_headers' | 'check_redirects' | 'check_credentials' | 'check_api_probe'
+    'check_ssl' | 'check_headers' | 'check_redirects' | 'check_credentials' | 'check_api_probe' | 'check_source_scan'
   >
   label: string
   description: string
@@ -40,6 +40,11 @@ const CHECKS: Array<{
     key: 'check_api_probe',
     label: 'API Endpoint Exposure',
     description: 'Probes common API paths for unintended data disclosure',
+  },
+  {
+    key: 'check_source_scan',
+    label: 'Source Code Secrets',
+    description: 'Scans HTML, inline scripts, and JS bundles for leaked API keys and credentials',
   },
 ]
 
@@ -223,6 +228,30 @@ function buildFixPrompt(scan: ScanData, siteUrl: string | undefined): string {
     }
   }
 
+  // Source code secrets
+  const sourceFindings = Array.isArray(scan.check_source_scan?.findings)
+    ? (scan.check_source_scan!.findings as SourceFinding[])
+    : []
+  if (sourceFindings.length > 0) {
+    lines.push(``)
+    lines.push(`## Leaked Secrets in Source Code`)
+    lines.push(`The following secrets were found in your frontend HTML, inline scripts, or JavaScript bundles. Rotate all affected keys immediately, then remove them from source.`)
+    for (const f of sourceFindings) {
+      lines.push(`- **${f.pattern}** (${f.severity}) in \`${f.source}\`: ${f.preview}`)
+    }
+  }
+
+  // Login page analysis
+  const loginCheck = scan.check_source_scan?.login_check
+  if (loginCheck && Array.isArray(loginCheck.findings) && loginCheck.findings.length > 0) {
+    lines.push(``)
+    lines.push(`## Login Page Security Issues`)
+    lines.push(`Login page: ${loginCheck.login_url}`)
+    for (const f of loginCheck.findings as LoginFinding[]) {
+      lines.push(`- **${f.issue}** (${f.severity}): ${f.detail}`)
+    }
+  }
+
   // SSL issues (only if not passed)
   if (scan.check_ssl && scan.check_ssl.status !== 'passed') {
     const days = scan.check_ssl.days_remaining
@@ -323,7 +352,7 @@ export default function ScanRealtime({
         .from('scans')
         .select(
           'status, error_message, overall_score, report_summary, agent_plan, remediation, ' +
-          'check_ssl, check_headers, check_redirects, check_credentials, check_api_probe'
+          'check_ssl, check_headers, check_redirects, check_credentials, check_api_probe, check_source_scan'
         )
         .eq('id', initialScan.id)
         .single()) as { data: Partial<ScanData> | null; error: unknown }

@@ -11,7 +11,7 @@ const PUBLIC_ROUTES = [
 ]
 const PUBLIC_PREFIXES = ['/api/leads']
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   })
