@@ -54,8 +54,11 @@ export async function proxy(request: NextRequest) {
     return supabaseResponse
   }
 
-  // Redirect unauthenticated users to login
+  // Unauthenticated: API routes return 401 JSON; all other routes redirect to login
   if (!user) {
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
     const redirectUrl = request.nextUrl.clone()
     redirectUrl.pathname = '/auth/login'
     return NextResponse.redirect(redirectUrl)

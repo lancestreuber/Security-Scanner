@@ -376,7 +376,8 @@ async function runAttackBattery(
   type AttackSpec = {
     name:    string
     request: () => Promise<Response>
-    detect:  (status: number, body: string) => AttackFinding | null
+    // location: the raw Location header value (may be empty string if none)
+    detect:  (status: number, body: string, location: string) => AttackFinding | null
   }
 
   const attacks: AttackSpec[] = [
@@ -389,7 +390,7 @@ async function runAttackBattery(
         `${origin}${path}?id=1'--&q=%27+OR+%271%27%3D%271&search=1+UNION+SELECT+NULL--`,
         { method: 'GET', headers: { 'User-Agent': UA }, redirect: 'follow' }
       ),
-      detect: (_status, body) => {
+      detect: (_status, body, _location) => {
         const SQL_ERR = /You have an error in your SQL syntax|ORA-\d{5}|PostgreSQL.*ERROR|SQLSTATE\[|pg_query\(\)|SQL syntax.*near|Unclosed quotation mark|Microsoft OLE DB Provider for SQL|SQLITE_ERROR|com\.mysql\.jdbc\.exceptions|ERROR 1064/i
         if (SQL_ERR.test(body)) {
           return { attack: 'SQL Injection', detail: 'SQL error message exposed — database injection likely exploitable', severity: 'high' }
@@ -407,7 +408,7 @@ async function runAttackBattery(
         `${origin}${path}/../../../../../etc/passwd`,
         { method: 'GET', headers: { 'User-Agent': UA }, redirect: 'follow' }
       ),
-      detect: (_status, body) => {
+      detect: (_status, body, _location) => {
         if (/root:x:0:0|daemon:x:\d+|nobody:x:\d+|\/bin\/(?:bash|sh|nologin)/.test(body)) {
           return { attack: 'Path Traversal', detail: 'Directory traversal succeeded — /etc/passwd content exposed in response', severity: 'high' }
         }
@@ -424,7 +425,7 @@ async function runAttackBattery(
         `${origin}${path}?debug=true&verbose=1&trace=1&admin=true&_debug=1`,
         { method: 'GET', headers: { 'User-Agent': UA }, redirect: 'follow' }
       ),
-      detect: (_status, body) => {
+      detect: (_status, body, _location) => {
         const TRACE = /at\s+\w[\w\$\.]+\s*\(.*:\d+\)|Traceback \(most recent call last\)|at com\.\w+\.\w+\(|Exception in thread main|System\.Exception:|stack trace:/i
         const ENV   = /(?:APP_KEY|DB_PASSWORD|SECRET_KEY|AWS_SECRET_ACCESS_KEY|DATABASE_URL)\s*[=:]\s*\S+/i
         if (TRACE.test(body)) return { attack: 'Debug Parameter Injection', detail: 'Stack trace exposed via debug parameters — disable debug mode in production', severity: 'medium' }
@@ -442,7 +443,7 @@ async function runAttackBattery(
         `${origin}${path}?url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F&proxy=http%3A%2F%2F169.254.169.254%2F&fetch=http%3A%2F%2F169.254.169.254%2F&redirect=http%3A%2F%2F169.254.169.254%2F`,
         { method: 'GET', headers: { 'User-Agent': UA }, redirect: 'follow' }
       ),
-      detect: (_status, body) => {
+      detect: (_status, body, _location) => {
         const META = /ami-id|instance-type|local-ipv4|iam\/info|security-credentials|EC2 IMDS|placement\/region|public-hostname/i
         if (META.test(body)) {
           return { attack: 'SSRF (Cloud Metadata)', detail: 'Server-Side Request Forgery — cloud instance metadata retrieved via URL parameter', severity: 'high' }
@@ -460,7 +461,7 @@ async function runAttackBattery(
         `${origin}${path}`,
         { method: 'GET', headers: { 'User-Agent': UA, 'Authorization': `Bearer ${JWT_NONE}` }, redirect: 'follow' }
       ),
-      detect: (status, body) => {
+      detect: (status, body, _location) => {
         // If endpoint returns 200 with data using an unsigned JWT → no signature validation
         const hasData = body.trim().length > 20
         if (status >= 200 && status < 300 && hasData) {
@@ -476,22 +477,24 @@ async function runAttackBattery(
 
     // ── Open Redirect / Parameter Injection ──────────────────
     // Tests whether common redirect parameters accept arbitrary URLs.
-    // A 3xx to an external domain confirms the vulnerability.
+    // Checks the actual Location header to confirm the redirect goes to an
+    // external domain — internal redirects (e.g. to /auth/login) are NOT flagged.
     {
       name:    'Open Redirect',
       request: () => fetch(
         `${origin}${path}?redirect=https%3A%2F%2Fevil.example.com&next=https%3A%2F%2Fevil.example.com&return_to=https%3A%2F%2Fevil.example.com`,
         { method: 'GET', headers: { 'User-Agent': UA }, redirect: 'manual' }
       ),
-      detect: (status, body) => {
-        // body unused — we check status here
-        void body
-        // A redirect to an external domain we don't control = open redirect
-        // Note: we'd need Location header access — this is a best-effort check
+      detect: (status, _body, location) => {
         if (status >= 300 && status < 400) {
-          // We can't read Location without the raw headers, but a redirect from
-          // a probed endpoint with redirect params is itself suspicious
-          return { attack: 'Open Redirect', detail: 'Endpoint redirected in response to redirect parameter — verify destination is validated', severity: 'medium' }
+          // Only flag if the Location header points to a different origin.
+          // Redirects to /auth/login, /login, or the same origin are expected behavior.
+          const isAbsoluteExternal =
+            (location.startsWith('http://') || location.startsWith('https://')) &&
+            !location.startsWith(origin)
+          if (isAbsoluteExternal) {
+            return { attack: 'Open Redirect', detail: `Endpoint redirected to external origin (${new URL(location).origin}) via redirect parameter — validate and whitelist allowed destinations`, severity: 'high' }
+          }
         }
         return null
       },
@@ -511,7 +514,7 @@ async function runAttackBattery(
           redirect: 'follow',
         }
       ),
-      detect: (_status, body) => {
+      detect: (_status, body, _location) => {
         if (body.includes('"__schema"') || (body.includes('"queryType"') && body.includes('"types"'))) {
           return { attack: 'GraphQL Introspection', detail: 'GraphQL introspection is enabled — the full API schema is publicly discoverable', severity: 'medium' }
         }
@@ -521,13 +524,15 @@ async function runAttackBattery(
   }
 
   // Run all attacks in parallel with per-request timeout
+  // Extract Location header before reading body (response stream can only be read once)
   const results = await Promise.allSettled(
     attacks.map(a =>
       withTimeout(a.request(), 4_000, `${a.name} on ${path}`)
         .then(async resp => {
+          const location = resp.headers.get('location') ?? ''
           let body = ''
           try { body = (await resp.text()).slice(0, 1000) } catch { /* timeout or read error */ }
-          return { name: a.name, status: resp.status, body, detect: a.detect }
+          return { name: a.name, status: resp.status, body, location, detect: a.detect }
         })
     )
   )
@@ -535,8 +540,8 @@ async function runAttackBattery(
   const findings: AttackFinding[] = []
   for (const r of results) {
     if (r.status !== 'fulfilled') continue
-    const { name: _n, status, body, detect } = r.value
-    const found = detect(status, body)
+    const { name: _n, status, body, location, detect } = r.value
+    const found = detect(status, body, location)
     if (found) findings.push(found)
   }
 
@@ -578,9 +583,11 @@ async function checkApiProbe(
         ).then(async resp => {
           const ct     = resp.headers.get('content-type') ?? ''
           const isJson = ct.includes('application/json')
+          // HTML responses are almost always login-page redirects, not real data exposure
+          const isHtml = ct.includes('text/html')
           let preview = ''
           try { preview = (await resp.text()).slice(0, 500) } catch { /* ok */ }
-          return { status: resp.status, isJson, hasData: preview.trim().length > 10 }
+          return { status: resp.status, isJson, isHtml, hasData: preview.trim().length > 10 }
         }).catch(() => null),
 
         // Attack battery
@@ -602,8 +609,10 @@ async function checkApiProbe(
     if (r.status !== 'fulfilled') continue
     const { target, baseline, attacks } = r.value
 
-    // Baseline: unauthenticated 200 with data
-    if (baseline && baseline.status >= 200 && baseline.status < 300 && baseline.hasData) {
+    // Baseline: unauthenticated 200 with data.
+    // Skip HTML responses — those are login-page redirects that the fetch followed,
+    // not actual unauthenticated data exposure.
+    if (baseline && baseline.status >= 200 && baseline.status < 300 && baseline.hasData && !baseline.isHtml) {
       findings.push({
         endpoint:    target.url,
         method:      target.method ?? 'GET',
@@ -710,6 +719,13 @@ function scanContentForSecrets(
 
   for (const line of lines) {
     for (const { name, pattern, severity } of SOURCE_SCAN_PATTERNS) {
+      // 'Password Assignment' is a broad pattern designed for config files / env files.
+      // In minified JS bundles the pattern generates many false positives because
+      // minified code has very long lines where 'password' can appear anywhere.
+      // 'Hardcoded Password in JS' (stricter — requires quoted value) already covers
+      // real secrets in JS, so skip 'Password Assignment' for js_bundle sources.
+      if (sourceType === 'js_bundle' && name === 'Password Assignment') continue
+
       const m = pattern.exec(line)
       if (m) {
         const matched  = m[0]
